@@ -6,6 +6,18 @@ import jwt
 from datetime import datetime, timedelta, timezone
 
 import models, database
+from pydantic import BaseModel
+
+# Pydantic schemas for request validation
+class ProductCreate(BaseModel):
+    name: str
+    description: str | None = None
+    price: float
+    stock: int
+
+class CartAdd(BaseModel):
+    product_id: int
+    quantity: int = 1
 
 # Secret key to sign JWT tokens (In production, load this from environment variables)
 SECRET_KEY = "super-secret-key-change-this"
@@ -34,6 +46,21 @@ def create_access_token(data: dict):
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    
+# Helper to get the currently authenticated user object from the JWT token
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(database.get_db)):
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    
+    user = db.query(models.User).filter(models.User.email == email).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 # --- ROUTES ---
 
@@ -82,3 +109,75 @@ def protected_route(token: str = Depends(oauth2_scheme)):
 @app.get("/")
 def home():
     return {"message": "Welcome to the AuthCart API! Go to /docs for API documentation."}
+# --- PRODUCT ROUTES ---
+
+@app.post("/products", status_code=status.HTTP_201_CREATED)
+def create_product(product: ProductCreate, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    db_product = models.Product(**product.dict())
+    db.add(db_product)
+    db.commit()
+    db.refresh(db_product)
+    return {"message": "Product created successfully", "product": db_product}
+
+@app.get("/products")
+def get_products(db: Session = Depends(database.get_db)):
+    return db.query(models.Product).all()
+
+
+# --- CART ROUTES (With IDOR Protection) ---
+
+@app.post("/cart")
+def add_to_cart(item: CartAdd, db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    # 1. Ensure product exists
+    product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+    if not product:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    # 2. Get or create cart strictly bound to the authenticated user ID
+    cart = db.query(models.Cart).filter(models.Cart.user_id == current_user.id).first()
+    if not cart:
+        cart = models.Cart(user_id=current_user.id)
+        db.add(cart)
+        db.commit()
+        db.refresh(cart)
+
+    # 3. Check if item already exists in cart, update quantity if so
+    cart_item = db.query(models.CartItem).filter(
+        models.CartItem.cart_id == cart.id, 
+        models.CartItem.product_id == item.product_id
+    ).first()
+
+    if cart_item:
+        cart_item.quantity += item.quantity
+    else:
+        cart_item = models.CartItem(cart_id=cart.id, product_id=item.product_id, quantity=item.quantity)
+        db.add(cart_item)
+
+    db.commit()
+    return {"message": "Item added to cart successfully"}
+
+@app.get("/cart")
+def view_cart(db: Session = Depends(database.get_db), current_user: models.User = Depends(get_current_user)):
+    # IDOR Prevention: We fetch ONLY the cart belonging to current_user.id from the token, 
+    # completely ignoring any user-supplied IDs in parameters.
+    cart = db.query(models.Cart).filter(models.Cart.user_id == current_user.id).first()
+    if not cart:
+        return {"items": [], "total": 0.0}
+
+    # Format cart items with details
+    cart_items = []
+    total = 0.0
+    for item in cart.items:
+        product = db.query(models.Product).filter(models.Product.id == item.product_id).first()
+        if product:
+            item_total = product.price * item.quantity
+            total += item_total
+            cart_items.append({
+                "product_id": product.id,
+                "name": product.name,
+                "price": product.price,
+                "quantity": item.quantity,
+                "subtotal": item_total
+            })
+
+    return {"cart_id": cart.id, "items": cart_items, "total": total}
