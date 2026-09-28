@@ -1,6 +1,8 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey
+from sqlalchemy import Column, Float, ForeignKey, Integer, String
 from sqlalchemy.orm import relationship
-from database import Base
+
+from app.db.database import Base
+
 
 class User(Base):
     __tablename__ = "users"
@@ -8,8 +10,6 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     email = Column(String, unique=True, index=True, nullable=False)
     hashed_password = Column(String, nullable=False)
-
-    # Relationship to user's cart
     cart = relationship("Cart", back_populates="user", uselist=False)
 
 
@@ -28,7 +28,6 @@ class Cart(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
-
     user = relationship("User", back_populates="cart")
     items = relationship("CartItem", back_populates="cart", cascade="all, delete-orphan")
 
@@ -40,6 +39,5 @@ class CartItem(Base):
     cart_id = Column(Integer, ForeignKey("carts.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     quantity = Column(Integer, default=1, nullable=False)
-
     cart = relationship("Cart", back_populates="items")
     product = relationship("Product")
