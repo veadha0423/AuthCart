@@ -23,6 +23,9 @@ def verify_password(plain_password, hashed_password):
 
 
 def create_access_token(data: dict):
+    if not settings.secret_key:
+        raise RuntimeError("AUTHCART_SECRET_KEY must be set before issuing access tokens")
+
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=settings.access_token_expire_minutes
